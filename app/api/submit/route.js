@@ -1,4 +1,4 @@
-import { getSheetsClient as getGoogleSheets } from "../../../lib/google";
+import { getSheetsClient } from "../../../lib/google";
 
 export async function POST(req) {
   try {
@@ -7,16 +7,20 @@ export async function POST(req) {
       return Response.json({ message: "No content" }, { status: 400 });
     }
 
-    const sheets = getGoogleSheets();
+    const sheets = getSheetsClient();
 
+    // สร้าง id สำหรับ��ถวใหม่ (ใช้ timestamp เป็นตัวอย่าง)
+    const id = Date.now().toString();
+
+    // เขียนลงคอลัมน์ A:D => [id, content, status, created_at]
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!C:F",
+      range: "Sheet1!A:D",
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: {
         values: [[
-          Date.now(),
+          id,
           content,
           "pending",
           new Date().toISOString()
@@ -26,7 +30,8 @@ export async function POST(req) {
 
     return Response.json({ message: "Submitted ✅" });
 
-  } catch {
+  } catch (err) {
+    console.error("SUBMIT ERROR:", err);
     return Response.json({ message: "Server error" }, { status: 500 });
   }
 }
