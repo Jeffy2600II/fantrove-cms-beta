@@ -1,4 +1,20 @@
-import { google } from "googleapis";
+import { getSheetsClient } from "../../../../lib/google";
+
+function normalizeHeaderCell(v) {
+  return (v === undefined || v === null) ? "" : String(v).toLowerCase().trim();
+}
+
+function colIndexToLetter(index) {
+  // 0 -> A, 25 -> Z, 26 -> AA ...
+  let s = "";
+  let n = index + 1;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
 
 export async function POST(req) {
   try {
@@ -11,18 +27,23 @@ export async function POST(req) {
       );
     }
 
-    const auth = new google.auth.JWT(
-      process.env.GOOGLE_CLIENT_EMAIL,
-      null,
-      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      ["https://www.googleapis.com/auth/spreadsheets"]
-    );
+    const sheets = getSheetsClient();
 
-    const sheets = google.sheets({ version: "v4", auth });
+    // อ่าน header เพื่อหา column ของ status แบบ dynamic
+    const headerRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "Sheet1!1:1"
+    });
+    const headerRow = (headerRes.data.values && headerRes.data.values[0]) || [];
+    const header = headerRow.map(normalizeHeaderCell);
+    const statusIdx = header.indexOf("status") >= 0 ? header.indexOf("status") : 2; // default C (index 2)
+
+    const colLetter = colIndexToLetter(statusIdx);
+    const range = `Sheet1!${colLetter}${rowIndex}`;
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: `Sheet1!C${rowIndex}`,
+      range,
       valueInputOption: "RAW",
       requestBody: {
         values: [[status]]
@@ -32,6 +53,7 @@ export async function POST(req) {
     return Response.json({ message: "Status updated" });
 
   } catch (err) {
+    console.error("UPDATE STATUS ERROR:", err);
     return Response.json({ message: "Update failed" }, { status: 500 });
   }
 }
