@@ -22,20 +22,16 @@ export async function POST(req) {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: `Sheet1!C${rowIndex}`, // column C = status
+      range: `Sheet1!C${rowIndex}`,
       valueInputOption: "RAW",
       requestBody: {
         values: [[status]]
       }
     });
 
-    return Response.json({ message: "Updated" });
+    return Response.json({ message: "Status updated" });
 
   } catch (err) {
-    console.error(err);
-    return Response.json(
-      { message: "Update failed" },
-      { status: 500 }
-    );
+    return Response.json({ message: "Update failed" }, { status: 500 });
   }
 }
