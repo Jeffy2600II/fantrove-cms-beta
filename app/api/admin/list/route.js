@@ -9,7 +9,7 @@ export async function GET(req) {
     
     const sheets = getSheetsClient();
     
-    // อ่านช่วงกว้างให้จับได้ทุกคอลัมน์
+    // อ่านช่วงกว้างให้จับได้ทุกคอลัมน์ (A:Z)
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
       range: "Sheet1!A:Z"
@@ -54,7 +54,7 @@ export async function GET(req) {
     const createdIdx = getIndex("created_at");
     
     const data = dataRows.map((row, i) => {
-      const sheetRowIndex = header ? i + 2 : i + 1;
+      const sheetRowIndex = header ? i + 2 : i + 1; // ถ้ามี header ให้ offset +1 (header คือแถว 1)
       return {
         rowIndex: sheetRowIndex,
         id: row[idIdx] || "",
@@ -64,11 +64,7 @@ export async function GET(req) {
       };
     });
     
-    const pending = data.filter(item =>
-      item.status.toLowerCase().trim() === "pending"
-    );
-    
-    return Response.json(pending);
+    return Response.json({ items: data, hasHeader: !!header });
   } catch (err) {
     console.error("ADMIN LIST ERROR:", err);
     return Response.json({ message: "Error loading data" }, { status: 500 });

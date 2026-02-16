@@ -7,16 +7,19 @@ const EXPIRY_KEY = "ADMIN_SECRET_EXPIRY";
 const ADMIN_SESSION_TTL_MS = 15 * 24 * 60 * 60 * 1000;
 
 export default function AdminPage() {
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState([]); // ทั้งหมด
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [adminSecret, setAdminSecret] = useState("");
   const [showLogin, setShowLogin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // เรียกใช้งาน API โดยแนบ Authorization ถ้ามี
+  // edits: map rowIndex -> { rowIndex, oldStatus, newStatus }
+  const [edits, setEdits] = useState({});
+
+  // API helper แนบ Authorization ถ้ามี
   const apiFetch = async (path, opts = {}) => {
-    const headers = opts.headers || {};
+    const headers = opts.headers ? { ...opts.headers } : {};
     const secret = getStoredSecret();
     if (secret) headers["Authorization"] = `Bearer ${secret}`;
     return fetch(path, { ...opts, headers });
@@ -56,7 +59,7 @@ export default function AdminPage() {
     localStorage.removeItem(EXPIRY_KEY);
   };
 
-  // ตรวจสอบว่า secret ใน localStorage ยังใช้งานได้ไหม โดยเร��ยก /api/admin/verify
+  // ตรวจสอบว่า secret ใน localStorage ยังใช้งานได้ไหม โดยเรียก /api/admin/verify
   const checkAuth = async () => {
     setAuthChecked(false);
     const s = getStoredSecret();
@@ -86,7 +89,6 @@ export default function AdminPage() {
       }
     } catch (err) {
       console.error("Auth check failed", err);
-      // ถ้ามี network error ให้เปิด modal ด้วย
       clearStoredSecret();
       setShowLogin(true);
       setAuthChecked(true);
@@ -94,14 +96,13 @@ export default function AdminPage() {
     }
   };
 
-  // เรียก /api/admin/list แต่จะตรวจ 401 -> แสดง modal login
+  // โหลดข้อมูลทั้งหมดจาก server (ไม่กรอง)
   const loadData = async () => {
     setLoading(true);
     setMessage("");
     try {
       const res = await apiFetch("/api/admin/list");
       if (res.status === 401) {
-        // ต้องกรอก secret ใหม่
         clearStoredSecret();
         setShowLogin(true);
         setItems([]);
@@ -112,7 +113,11 @@ export default function AdminPage() {
         setItems([]);
       } else {
         const data = await res.json();
-        setItems(Array.isArray(data) ? data : []);
+        // ตอนนี้ /api/admin/list ส่ง { items, hasHeader }
+        const list = Array.isArray(data.items) ? data.items : [];
+        setItems(list);
+        // reset edits buffer เพราะโหลดข้อมูลใหม่
+        setEdits({});
       }
     } catch (err) {
       console.error(err);
@@ -123,76 +128,140 @@ export default function AdminPage() {
     }
   };
 
-  // อัปเดตสถานะ (approve / reject) — แนบ Authorization
-  const updateStatus = async (rowIndex, status) => {
-    const ok = confirm(`Are you sure you want to mark this item as "${status}"?`);
+  // เมื่อเปลี่ยนสถานะใน UI ให้เก็บไว้ใน edits buffer (ยังไม่บันทึกกลับ sheet)
+  const changeStatusLocal = (rowIndex, oldStatus, newStatus) => {
+    setEdits(prev => {
+      const next = { ...prev };
+      // ถ้าค่าเดิมไม่มีการเปลี่ยนแปลง ให้ลบออกจาก buffer
+      if (newStatus === oldStatus) {
+        delete next[rowIndex];
+      } else {
+        next[rowIndex] = { rowIndex, oldStatus, newStatus };
+      }
+      return next;
+    });
+
+    // Update items array view
+    setItems(prevItems => prevItems.map(it => it.rowIndex === rowIndex ? { ...it, status: newStatus } : it));
+  };
+
+  // ยกเลิกการเปลี่ยนแปลงทั้งหมด (clear buffer and reload)
+  const cancelEdits = async () => {
+    setEdits({});
+    await loadData();
+    setMessage("Changes cancelled");
+  };
+
+  // Save changes (batch update to Google Sheets) — ไม่ sync ขึ้น GitHub
+  const saveChanges = async () => {
+    const editsArr = Object.values(edits);
+    if (editsArr.length === 0) {
+      setMessage("No changes to save");
+      return;
+    }
+
+    const ok = confirm(`Save ${editsArr.length} changes to sheet?`);
     if (!ok) return;
 
     setLoading(true);
-    setMessage("");
+    setMessage("Saving changes...");
+
     try {
-      const res = await apiFetch("/api/admin/update-status", {
+      const res = await apiFetch("/api/admin/batch-update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rowIndex, status })
+        body: JSON.stringify({ edits: editsArr })
       });
 
       if (res.status === 401) {
         clearStoredSecret();
         setShowLogin(true);
         setMessage("Unauthorized — please sign in");
+      } else if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setMessage(data.message || "Save failed");
       } else {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setMessage(data.message || "Update failed");
-        } else {
-          setMessage(`Marked as ${status}`);
-          await loadData();
-        }
+        setMessage(data.message || "Saved changes");
+        // หลัง save ให้เคลียร์ buffer แล้ว reload เพื่อความแน่ใจ
+        setEdits({});
+        await loadData();
       }
     } catch (err) {
       console.error(err);
-      setMessage("Update failed");
+      setMessage("Save failed");
     } finally {
       setLoading(false);
     }
   };
 
-  // Sync approved -> แนบ Authorization
-  const syncData = async () => {
-    const s = getStoredSecret();
-    if (!s) {
-      setMessage("Please sign in before syncing");
-      setShowLogin(true);
-      return;
+  // Save changes + Sync (batch update then call /api/sync)
+  const saveAndSync = async () => {
+    const editsArr = Object.values(edits);
+    if (editsArr.length === 0) {
+      // แม้ไม่มี edits แต่อาจจะต้องเรียก sync ถ้ามี approved อยู่ก่อนแล้ว
+      const ok2 = confirm("No buffered changes. Do you want to run Sync to push approved items to GitHub?");
+      if (!ok2) return;
     }
 
-    const ok = confirm("Sync will push approved items to GitHub and remove them from the sheet. Continue?");
+    const ok = confirm("This will save changes to sheet and then sync approved items to GitHub. Continue?");
     if (!ok) return;
 
     setLoading(true);
-    setMessage("Syncing...");
+    setMessage("Saving changes and syncing...");
 
     try {
-      const res = await fetch("/api/sync", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${s}`
+      // 1) ถ้ามี edits ให้บันทึกก่อน
+      if (editsArr.length > 0) {
+        const res1 = await apiFetch("/api/admin/batch-update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ edits: editsArr })
+        });
+
+        if (res1.status === 401) {
+          clearStoredSecret();
+          setShowLogin(true);
+          setMessage("Unauthorized — please sign in");
+          setLoading(false);
+          return;
+        } else if (!res1.ok) {
+          const d = await res1.json().catch(() => ({}));
+          setMessage(d.message || "Save failed");
+          setLoading(false);
+          return;
         }
+      }
+
+      // 2) เรียก /api/sync (ต้องมี admin secret)
+      const s = getStoredSecret();
+      if (!s) {
+        setMessage("Please sign in before syncing");
+        setShowLogin(true);
+        setLoading(false);
+        return;
+      }
+
+      const res2 = await fetch("/api/sync", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${s}` }
       });
 
-      if (res.status === 401) {
+      if (res2.status === 401) {
         clearStoredSecret();
         setShowLogin(true);
         setMessage("Unauthorized — please sign in");
       } else {
-        const data = await res.json().catch(() => ({}));
-        setMessage(data.message || (res.ok ? "Synced successfully" : "Sync failed"));
-        if (res.ok) await loadData();
+        const d2 = await res2.json().catch(() => ({}));
+        setMessage(d2.message || (res2.ok ? "Synced successfully" : "Sync failed"));
+        if (res2.ok) {
+          setEdits({});
+          await loadData();
+        }
       }
     } catch (err) {
       console.error(err);
-      setMessage("Sync failed");
+      setMessage("Save & Sync failed");
     } finally {
       setLoading(false);
     }
@@ -234,7 +303,6 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
-    // เมื่อเข้ามาหน้า admin ให้ตรว��� auth ก่อน ถ้าอยู่ใน session => รีเซ็ต expiry
     (async () => {
       const ok = await checkAuth();
       if (ok) {
@@ -244,18 +312,25 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // UI
-  // ถ้ auth ยังไม่ถูกตรวจ ให้แสดง loading placeholder
   if (!authChecked) {
     return <div style={{ padding: 40 }}>Checking authentication...</div>;
   }
+
+  // จำนวนการเปลี่ยนแปลงใน buffer
+  const editCount = Object.keys(edits).length;
 
   return (
     <div style={{ padding: 40, fontFamily: "sans-serif" }}>
       <h1>Admin Review Panel</h1>
 
       <div style={{ marginBottom: 12 }}>
-        <button onClick={syncData} disabled={loading} style={{ padding: "8px 16px" }}>Sync Approved to GitHub</button>
+        <button onClick={saveAndSync} disabled={loading} style={{ padding: "8px 16px" }}>Save & Sync</button>
+        <button onClick={saveChanges} disabled={loading || editCount === 0} style={{ marginLeft: 12, padding: "8px 12px" }}>
+          Save changes ({editCount})
+        </button>
+        <button onClick={cancelEdits} disabled={loading || editCount === 0} style={{ marginLeft: 12, padding: "8px 12px" }}>
+          Cancel changes
+        </button>
         <button onClick={loadData} disabled={loading} style={{ marginLeft: 12, padding: "8px 12px" }}>Refresh</button>
         <button onClick={handleSignOut} disabled={loading} style={{ marginLeft: 12, padding: "8px 12px" }}>Sign out</button>
       </div>
@@ -264,7 +339,7 @@ export default function AdminPage() {
       {message && <p>{message}</p>}
 
       {items.length === 0 && !loading && (
-        <p>No pending items</p>
+        <p>No items found</p>
       )}
 
       {items.map((item) => (
@@ -273,52 +348,27 @@ export default function AdminPage() {
           style={{
             border: "1px solid #ccc",
             padding: 15,
-            marginBottom: 15,
+            marginBottom: 12,
             borderRadius: 6
           }}
         >
-          <p><strong>ID:</strong> {item.id}</p>
+          <p><strong>Row:</strong> {item.rowIndex} &nbsp; <strong>ID:</strong> {item.id}</p>
           <p><strong>Content:</strong> {item.content}</p>
-          <p><strong>Status:</strong> {item.status}</p>
+          <p>
+            <strong>Status:</strong>{" "}
+            <select
+              value={item.status || ""}
+              onChange={(e) => changeStatusLocal(item.rowIndex, item.status || "", e.target.value)}
+            >
+              <option value="">(empty)</option>
+              <option value="pending">pending</option>
+              <option value="approved">approved</option>
+              <option value="rejected">rejected</option>
+            </select>
+          </p>
           <p><small>{item.created_at}</small></p>
-
-          <div style={{ marginTop: 10 }}>
-            <button
-              onClick={() =>
-                updateStatus(item.rowIndex, "approved")
-              }
-              disabled={loading}
-              style={{
-                marginRight: 10,
-                padding: "6px 12px",
-                cursor: "pointer"
-              }}
-            >
-              Approve
-            </button>
-
-            <button
-              onClick={() =>
-                updateStatus(item.rowIndex, "rejected")
-              }
-              disabled={loading}
-              style={{
-                padding: "6px 12px",
-                cursor: "pointer"
-              }}
-            >
-              Reject
-            </button>
-          </div>
         </div>
       ))}
-
-      {showLogin && (
-        <LoginModal
-          onSubmit={handleLogin}
-          loading={loading}
-        />
-      )}
     </div>
   );
 }
