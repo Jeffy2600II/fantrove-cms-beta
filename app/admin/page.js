@@ -113,10 +113,9 @@ export default function AdminPage() {
         setItems([]);
       } else {
         const data = await res.json();
-        // ตอนนี้ /api/admin/list ส่ง { items, hasHeader }
+        // /api/admin/list ส่ง { items, hasHeader } แต่เราสนใจ items
         const list = Array.isArray(data.items) ? data.items : [];
         setItems(list);
-        // reset edits buffer เพราะโหลดข้อมูลใหม่
         setEdits({});
       }
     } catch (err) {
@@ -129,10 +128,10 @@ export default function AdminPage() {
   };
 
   // เมื่อเปลี่ยนสถานะใน UI ให้เก็บไว้ใน edits buffer (ยังไม่บันทึกกลับ sheet)
+  // newStatus === "" หมายถึง "ลบแถว"
   const changeStatusLocal = (rowIndex, oldStatus, newStatus) => {
     setEdits(prev => {
       const next = { ...prev };
-      // ถ้าค่าเดิมไม่มีการเปลี่ยนแปลง ให้ลบออกจาก buffer
       if (newStatus === oldStatus) {
         delete next[rowIndex];
       } else {
@@ -143,6 +142,18 @@ export default function AdminPage() {
 
     // Update items array view
     setItems(prevItems => prevItems.map(it => it.rowIndex === rowIndex ? { ...it, status: newStatus } : it));
+  };
+
+  // Toggle mark-for-delete (set newStatus = "")
+  const toggleDelete = (rowIndex, oldStatus) => {
+    const currentlyMarked = edits[rowIndex] && edits[rowIndex].newStatus === "";
+    if (currentlyMarked) {
+      // unmark -> restore to oldStatus
+      changeStatusLocal(rowIndex, oldStatus, oldStatus);
+    } else {
+      // mark for deletion
+      changeStatusLocal(rowIndex, oldStatus, "");
+    }
   };
 
   // ยกเลิกการเปลี่ยนแปลงทั้งหมด (clear buffer and reload)
@@ -160,7 +171,7 @@ export default function AdminPage() {
       return;
     }
 
-    const ok = confirm(`Save ${editsArr.length} changes to sheet?`);
+    const ok = confirm(`Save ${editsArr.length} changes to sheet? (Deletions will remove rows)`);
     if (!ok) return;
 
     setLoading(true);
@@ -198,14 +209,8 @@ export default function AdminPage() {
   // Save changes + Sync (batch update then call /api/sync)
   const saveAndSync = async () => {
     const editsArr = Object.values(edits);
-    if (editsArr.length === 0) {
-      // แม้ไม่มี edits แต่อาจจะต้องเรียก sync ถ้ามี approved อยู่ก่อนแล้ว
-      const ok2 = confirm("No buffered changes. Do you want to run Sync to push approved items to GitHub?");
-      if (!ok2) return;
-    }
-
-    const ok = confirm("This will save changes to sheet and then sync approved items to GitHub. Continue?");
-    if (!ok) return;
+    const proceed = confirm("This will save changes to sheet and then sync approved items to GitHub. Continue?");
+    if (!proceed) return;
 
     setLoading(true);
     setMessage("Saving changes and syncing...");
@@ -342,33 +347,56 @@ export default function AdminPage() {
         <p>No items found</p>
       )}
 
-      {items.map((item) => (
-        <div
-          key={item.rowIndex + "-" + item.id}
-          style={{
-            border: "1px solid #ccc",
-            padding: 15,
-            marginBottom: 12,
-            borderRadius: 6
-          }}
-        >
-          <p><strong>Row:</strong> {item.rowIndex} &nbsp; <strong>ID:</strong> {item.id}</p>
-          <p><strong>Content:</strong> {item.content}</p>
-          <p>
-            <strong>Status:</strong>{" "}
-            <select
-              value={item.status || ""}
-              onChange={(e) => changeStatusLocal(item.rowIndex, item.status || "", e.target.value)}
-            >
-              <option value="">(empty)</option>
-              <option value="pending">pending</option>
-              <option value="approved">approved</option>
-              <option value="rejected">rejected</option>
-            </select>
-          </p>
-          <p><small>{item.created_at}</small></p>
-        </div>
-      ))}
+      {items.map((item) => {
+        const oldStatus = item.status || "";
+        const isMarkedDelete = edits[item.rowIndex] && edits[item.rowIndex].newStatus === "";
+        return (
+          <div
+            key={item.rowIndex + "-" + item.id}
+            style={{
+              border: "1px solid #ccc",
+              padding: 15,
+              marginBottom: 12,
+              borderRadius: 6,
+              opacity: isMarkedDelete ? 0.6 : 1,
+              position: "relative"
+            }}
+          >
+            <p><strong>Row:</strong> {item.rowIndex} &nbsp; <strong>ID:</strong> {item.id}</p>
+            <p><strong>Content:</strong> {item.content}</p>
+            <p>
+              <strong>Status:</strong>{" "}
+              {oldStatus === "" && !isMarkedDelete ? (
+                <em style={{ color: "#b00" }}>(empty)</em>
+              ) : null}
+              <select
+                value={isMarkedDelete ? "" : (item.status || "")}
+                onChange={(e) => changeStatusLocal(item.rowIndex, oldStatus, e.target.value)}
+                style={{ marginLeft: 8 }}
+              >
+                {/* ไม่มี option ว่าง — ผู้ใช้ต้องเลือก 1 ใน 3 ค่า */}
+                <option value="pending">pending</option>
+                <option value="approved">approved</option>
+                <option value="rejected">rejected</option>
+              </select>
+
+              <button
+                onClick={() => toggleDelete(item.rowIndex, oldStatus)}
+                style={{ marginLeft: 12, padding: "6px 10px" }}
+                title="Mark row for deletion (this will remove the entire row on Save)"
+              >
+                {isMarkedDelete ? "Unmark delete" : "Delete row"}
+              </button>
+            </p>
+            <p><small>{item.created_at}</small></p>
+            {isMarkedDelete && (
+              <div style={{ position: "absolute", top: 10, right: 10, color: "#900" }}>
+                Marked for deletion
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
