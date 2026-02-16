@@ -1,30 +1,118 @@
 "use client";
 import { useEffect, useState } from "react";
 
+const STORAGE_KEY = "ADMIN_SECRET";
+const EXPIRY_KEY = "ADMIN_SECRET_EXPIRY";
+// Session TTL: 15 days
+const ADMIN_SESSION_TTL_MS = 15 * 24 * 60 * 60 * 1000;
+
 export default function AdminPage() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
-  const [adminSecret, setAdminSecret] = useState(
-    typeof window !== "undefined" ? localStorage.getItem("ADMIN_SECRET") || "" : ""
-  );
-  
-  // โหลดรายการ pending
+  const [adminSecret, setAdminSecret] = useState("");
+  const [showLogin, setShowLogin] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // เรียกใช้งาน API โดยแนบ Authorization ถ้ามี
+  const apiFetch = async (path, opts = {}) => {
+    const headers = opts.headers || {};
+    const secret = getStoredSecret();
+    if (secret) headers["Authorization"] = `Bearer ${secret}`;
+    return fetch(path, { ...opts, headers });
+  };
+
+  // localStorage helpers
+  const getStoredSecret = () => {
+    if (typeof window === "undefined") return null;
+    const s = localStorage.getItem(STORAGE_KEY);
+    const exp = Number(localStorage.getItem(EXPIRY_KEY) || "0");
+    if (!s || !exp) return null;
+    if (Date.now() > exp) {
+      // expired
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(EXPIRY_KEY);
+      return null;
+    }
+    return s;
+  };
+
+  const storeSecretWithExpiry = (secret) => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(STORAGE_KEY, secret);
+    localStorage.setItem(EXPIRY_KEY, String(Date.now() + ADMIN_SESSION_TTL_MS));
+  };
+
+  const resetExpiryIfAuthenticated = () => {
+    const s = getStoredSecret();
+    if (s) {
+      localStorage.setItem(EXPIRY_KEY, String(Date.now() + ADMIN_SESSION_TTL_MS));
+    }
+  };
+
+  const clearStoredSecret = () => {
+    if (typeof window === "undefined") return;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(EXPIRY_KEY);
+  };
+
+  // ตรวจสอบว่า secret ใน localStorage ยังใช้งานได้ไหม โดยเร��ยก /api/admin/verify
+  const checkAuth = async () => {
+    setAuthChecked(false);
+    const s = getStoredSecret();
+    if (!s) {
+      setShowLogin(true);
+      setAuthChecked(true);
+      return false;
+    }
+    try {
+      const res = await fetch("/api/admin/verify", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${s}` }
+      });
+      if (res.ok) {
+        // authenticated
+        resetExpiryIfAuthenticated();
+        setShowLogin(false);
+        setAdminSecret(s);
+        setAuthChecked(true);
+        return true;
+      } else {
+        // invalid -> remove and show login
+        clearStoredSecret();
+        setShowLogin(true);
+        setAuthChecked(true);
+        return false;
+      }
+    } catch (err) {
+      console.error("Auth check failed", err);
+      // ถ้ามี network error ให้เปิด modal ด้วย
+      clearStoredSecret();
+      setShowLogin(true);
+      setAuthChecked(true);
+      return false;
+    }
+  };
+
+  // เรียก /api/admin/list แต่จะตรวจ 401 -> แสดง modal login
   const loadData = async () => {
     setLoading(true);
     setMessage("");
     try {
-      const res = await fetch("/api/admin/list");
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: "Error" }));
+      const res = await apiFetch("/api/admin/list");
+      if (res.status === 401) {
+        // ต้องกรอก secret ใหม่
+        clearStoredSecret();
+        setShowLogin(true);
+        setItems([]);
+        setMessage("Unauthorized — please sign in");
+      } else if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
         setMessage(err.message || "Error loading data");
         setItems([]);
       } else {
         const data = await res.json();
         setItems(Array.isArray(data) ? data : []);
-        if (!Array.isArray(data)) {
-          setMessage("Unexpected response from server");
-        }
       }
     } catch (err) {
       console.error(err);
@@ -34,29 +122,33 @@ export default function AdminPage() {
       setLoading(false);
     }
   };
-  
-  // อัปเดตสถานะ (approve / reject)
+
+  // อัปเดตสถานะ (approve / reject) — แนบ Authorization
   const updateStatus = async (rowIndex, status) => {
     const ok = confirm(`Are you sure you want to mark this item as "${status}"?`);
     if (!ok) return;
-    
+
     setLoading(true);
     setMessage("");
     try {
-      const res = await fetch("/api/admin/update-status", {
+      const res = await apiFetch("/api/admin/update-status", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rowIndex, status })
       });
-      
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setMessage(data.message || "Update failed");
+
+      if (res.status === 401) {
+        clearStoredSecret();
+        setShowLogin(true);
+        setMessage("Unauthorized — please sign in");
       } else {
-        setMessage(`Marked as ${status}`);
-        await loadData();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setMessage(data.message || "Update failed");
+        } else {
+          setMessage(`Marked as ${status}`);
+          await loadData();
+        }
       }
     } catch (err) {
       console.error(err);
@@ -65,34 +157,38 @@ export default function AdminPage() {
       setLoading(false);
     }
   };
-  
-  // Sync approved ไป GitHub (ต้องมี adminSecret)
+
+  // Sync approved -> แนบ Authorization
   const syncData = async () => {
-    if (!adminSecret) {
-      setMessage("Please enter Admin Secret before syncing");
+    const s = getStoredSecret();
+    if (!s) {
+      setMessage("Please sign in before syncing");
+      setShowLogin(true);
       return;
     }
-    
+
     const ok = confirm("Sync will push approved items to GitHub and remove them from the sheet. Continue?");
     if (!ok) return;
-    
+
     setLoading(true);
     setMessage("Syncing...");
-    
+
     try {
       const res = await fetch("/api/sync", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${adminSecret}`
+          Authorization: `Bearer ${s}`
         }
       });
-      
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setMessage(data.message || "Sync failed");
+
+      if (res.status === 401) {
+        clearStoredSecret();
+        setShowLogin(true);
+        setMessage("Unauthorized — please sign in");
       } else {
-        setMessage(data.message || "Synced successfully");
-        await loadData();
+        const data = await res.json().catch(() => ({}));
+        setMessage(data.message || (res.ok ? "Synced successfully" : "Sync failed"));
+        if (res.ok) await loadData();
       }
     } catch (err) {
       console.error(err);
@@ -101,87 +197,68 @@ export default function AdminPage() {
       setLoading(false);
     }
   };
-  
-  // เก็บ secret ใน localStorage (ถ้าผู้ใช้ต้องการ)
-  const saveSecret = () => {
+
+  const handleLogin = async (enteredSecret) => {
+    setLoading(true);
+    setMessage("");
     try {
-      localStorage.setItem("ADMIN_SECRET", adminSecret || "");
-      setMessage("Admin secret saved (local)");
-    } catch {
-      setMessage("Could not save secret locally");
+      const res = await fetch("/api/admin/verify", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${enteredSecret}`
+        }
+      });
+      if (res.ok) {
+        storeSecretWithExpiry(enteredSecret);
+        setAdminSecret(enteredSecret);
+        setShowLogin(false);
+        setMessage("Signed in");
+        await loadData();
+      } else {
+        setMessage("Invalid admin secret");
+      }
+    } catch (err) {
+      console.error(err);
+      setMessage("Sign-in failed");
+    } finally {
+      setLoading(false);
     }
   };
-  
-  const clearSecret = () => {
-    try {
-      localStorage.removeItem("ADMIN_SECRET");
-      setAdminSecret("");
-      setMessage("Admin secret cleared");
-    } catch {
-      setMessage("Could not clear secret");
-    }
+
+  const handleSignOut = () => {
+    clearStoredSecret();
+    setAdminSecret("");
+    setItems([]);
+    setShowLogin(true);
+    setMessage("Signed out");
   };
-  
+
   useEffect(() => {
-    loadData();
+    // เมื่อเข้ามาหน้า admin ให้ตรว��� auth ก่อน ถ้าอยู่ใน session => รีเซ็ต expiry
+    (async () => {
+      const ok = await checkAuth();
+      if (ok) {
+        await loadData();
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  
+
+  // UI
+  // ถ้ auth ยังไม่ถูกตรวจ ให้แสดง loading placeholder
+  if (!authChecked) {
+    return <div style={{ padding: 40 }}>Checking authentication...</div>;
+  }
+
   return (
     <div style={{ padding: 40, fontFamily: "sans-serif" }}>
       <h1>Admin Review Panel</h1>
 
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ display: "block", marginBottom: 6 }}>
-          Admin Secret (required for Sync):
-        </label>
-        <input
-          type="password"
-          value={adminSecret}
-          onChange={(e) => setAdminSecret(e.target.value)}
-          placeholder="Enter admin secret"
-          style={{ padding: "8px 10px", width: 360 }}
-        />
-        <button
-          onClick={saveSecret}
-          disabled={loading}
-          style={{ marginLeft: 10, padding: "8px 12px" }}
-        >
-          Save secret
-        </button>
-        <button
-          onClick={clearSecret}
-          disabled={loading}
-          style={{ marginLeft: 8, padding: "8px 12px" }}
-        >
-          Clear
-        </button>
+      <div style={{ marginBottom: 12 }}>
+        <button onClick={syncData} disabled={loading} style={{ padding: "8px 16px" }}>Sync Approved to GitHub</button>
+        <button onClick={loadData} disabled={loading} style={{ marginLeft: 12, padding: "8px 12px" }}>Refresh</button>
+        <button onClick={handleSignOut} disabled={loading} style={{ marginLeft: 12, padding: "8px 12px" }}>Sign out</button>
       </div>
-
-      <button
-        onClick={syncData}
-        disabled={loading}
-        style={{
-          marginBottom: 20,
-          padding: "8px 16px",
-          cursor: "pointer"
-        }}
-      >
-        Sync Approved to GitHub
-      </button>
-
-      <button
-        onClick={loadData}
-        disabled={loading}
-        style={{
-          marginLeft: 12,
-          marginBottom: 20,
-          padding: "8px 12px",
-          cursor: "pointer"
-        }}
-      >
-        Refresh
-      </button>
 
       {loading && <p>Loading...</p>}
       {message && <p>{message}</p>}
@@ -235,6 +312,53 @@ export default function AdminPage() {
           </div>
         </div>
       ))}
+
+      {showLogin && (
+        <LoginModal
+          onSubmit={handleLogin}
+          loading={loading}
+        />
+      )}
+    </div>
+  );
+}
+
+// Simple modal component for secret input (hidden after success)
+function LoginModal({ onSubmit, loading }) {
+  const [val, setVal] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!val) return;
+    onSubmit(val);
+    setVal("");
+  };
+
+  return (
+    <div style={{
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.6)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 9999
+    }}>
+      <form onSubmit={submit} style={{ background: "#fff", padding: 24, borderRadius: 8, width: 420 }}>
+        <h2>Admin sign in</h2>
+        <p>Enter admin secret to continue.</p>
+        <input
+          autoFocus
+          type="password"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          placeholder="Admin secret"
+          style={{ width: "100%", padding: "8px 10px", marginBottom: 12 }}
+        />
+        <div style={{ textAlign: "right" }}>
+          <button type="submit" disabled={loading} style={{ padding: "8px 12px" }}>Sign in</button>
+        </div>
+      </form>
     </div>
   );
 }

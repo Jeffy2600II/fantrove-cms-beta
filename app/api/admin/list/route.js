@@ -1,10 +1,15 @@
 import { getSheetsClient } from "../../../../lib/google";
 
-export async function GET() {
+export async function GET(req) {
   try {
+    const authHeader = req.headers.get("authorization");
+    if (authHeader !== `Bearer ${process.env.ADMIN_SECRET}`) {
+      return Response.json({ message: "Unauthorized" }, { status: 401 });
+    }
+    
     const sheets = getSheetsClient();
     
-    // อ่านช่วงกว้าง ให้จับได้ทุกคอลัมน์ (A:Z)
+    // อ่านช่วงกว้างให้จับได้ทุกคอลัมน์
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
       range: "Sheet1!A:Z"
@@ -29,11 +34,9 @@ export async function GET() {
       header = firstRow.map(h => (h || "").toString().toLowerCase().trim());
       dataRows = rows.slice(1);
     } else {
-      // ไม่มี header ให้ถือว่าแถวทั้งหมดเป็นข้อมูล
       dataRows = rows;
     }
     
-    // ฟังก์ชันหา index ของคอลัมน์จากชื่อ header หรือ fallback เป็นตำแหน่งดีฟอลต์
     const getIndex = (name) => {
       if (header) {
         const exact = header.findIndex(h => h === name);
@@ -51,7 +54,7 @@ export async function GET() {
     const createdIdx = getIndex("created_at");
     
     const data = dataRows.map((row, i) => {
-      const sheetRowIndex = header ? i + 2 : i + 1; // ถ้ามี header ให้ offset +1 (header คือแถว 1)
+      const sheetRowIndex = header ? i + 2 : i + 1;
       return {
         rowIndex: sheetRowIndex,
         id: row[idIdx] || "",
