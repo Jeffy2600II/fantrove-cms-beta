@@ -1,4 +1,4 @@
-import { getGoogleSheets } from "@/lib/google";
+import { getSheetsClient as getGoogleSheets } from "../../../lib/google";
 
 export async function POST(req) {
   try {
