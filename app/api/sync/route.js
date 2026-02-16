@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { getSheetsClient } from "../../../lib/google";
 
 export async function POST(req) {
   try {
@@ -7,38 +7,60 @@ export async function POST(req) {
       return Response.json({ message: "Unauthorized" }, { status: 401 });
     }
     
-    const auth = new google.auth.JWT(
-      process.env.GOOGLE_CLIENT_EMAIL,
-      null,
-      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      ["https://www.googleapis.com/auth/spreadsheets"]
-    );
+    const sheets = getSheetsClient();
     
-    const sheets = google.sheets({ version: "v4", auth });
-    
-    // -------- 1. ดึงข้อมูลทั้งหมด --------
+    // -------- 1. ดึงข้อมูลทั้งหมด (อ่านกว้างเพื่อจับ header หรือข้อมูล) --------
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A:D"
+      range: "Sheet1!A:Z"
     });
     
     const rows = response.data.values || [];
-    if (rows.length <= 1) {
+    if (rows.length === 0) {
       return Response.json({ message: "No data to sync" });
     }
     
-    const header = rows[0];
-    const dataRows = rows.slice(1);
+    const firstRow = rows[0] || [];
+    const headerLooksLikeHeader = firstRow.some(cell =>
+      typeof cell === "string" && /id|content|status|created_at/i.test(cell)
+    );
+    
+    let header = null;
+    let dataRows = [];
+    
+    if (headerLooksLikeHeader) {
+      header = firstRow.map(h => (h || "").toString().toLowerCase().trim());
+      dataRows = rows.slice(1);
+    } else {
+      dataRows = rows;
+    }
+    
+    const getIndex = (name) => {
+      if (header) {
+        const exact = header.findIndex(h => h === name);
+        if (exact !== -1) return exact;
+        const fuzzy = header.findIndex(h => h.includes(name));
+        if (fuzzy !== -1) return fuzzy;
+      }
+      const defaults = { id: 0, content: 1, status: 2, created_at: 3 };
+      return defaults[name];
+    };
+    
+    const idIdx = getIndex("id");
+    const contentIdx = getIndex("content");
+    const statusIdx = getIndex("status");
+    const createdIdx = getIndex("created_at");
     
     const approved = [];
-    const remaining = [header];
+    const remaining = header ? [firstRow] : [];
     
-    dataRows.forEach(row => {
-      if (row[2] === "approved") {
+    dataRows.forEach((row) => {
+      const statusVal = (row[statusIdx] || "").toString().toLowerCase().trim();
+      if (statusVal === "approved") {
         approved.push({
-          id: row[0],
-          content: row[1],
-          created_at: row[3]
+          id: row[idIdx] || "",
+          content: row[contentIdx] || "",
+          created_at: row[createdIdx] || ""
         });
       } else {
         remaining.push(row);
@@ -87,10 +109,10 @@ export async function POST(req) {
       }
     );
     
-    // -------- 3. ล้าง approved ออกจาก Sheet --------
+    // -------- 3. ล้าง approved ออกจาก Sheet (เขียน remaining กลับ) --------
     await sheets.spreadsheets.values.update({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A:D",
+      range: "Sheet1!A:Z",
       valueInputOption: "RAW",
       requestBody: {
         values: remaining
@@ -102,6 +124,7 @@ export async function POST(req) {
     });
     
   } catch (err) {
+    console.error("SYNC ERROR:", err);
     return Response.json({ message: "Sync failed" }, { status: 500 });
   }
 }
